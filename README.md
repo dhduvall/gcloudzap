@@ -1,6 +1,8 @@
-# ⚡ gcloudzap [![GoDoc](https://godoc.org/github.com/jonstaryuk/gcloudzap?status.svg)](https://godoc.org/github.com/jonstaryuk/gcloudzap)
+# ⚡ gcloudzap [![GoDoc](https://godoc.org/github.com/dhduvall/gcloudzap?status.svg)](https://godoc.org/github.com/dhduvall/gcloudzap)
 
 **(experimental)**
+
+Formerly https://github.com/jonstaryuk/gcloudzap
 
 This package provides a zap logger that forwards entries to the Google Stackdriver Logging service as structured payloads.
 
@@ -11,7 +13,7 @@ Outside of Google Compute Engine, just add the environment variable `GOOGLE_APPL
 #### Option 1: Less configuration
 
 ```go
-import "github.com/jonstaryuk/gcloudzap"
+import "github.com/dhduvall/gcloudzap"
 
 log, err := gcloudzap.NewDevelopment("your-project-id", "your-log-id")
 if err != nil {
@@ -30,7 +32,7 @@ log.Sugar().
 import (
     "go.uber.org/zap"
     "cloud.google.com/go/logging"
-    "github.com/jonstaryuk/gcloudzap"
+    "github.com/dhduvall/gcloudzap"
 )
 
 // Configure the pieces
@@ -47,7 +49,7 @@ log, err := gcloudzap.New(cfg, client, "your-log-id", zap.Option(), ...)
 import (
     "go.uber.org/zap/zapcore"
     "cloud.google.com/go/logging"
-    "github.com/jonstaryuk/gcloudzap"
+    "github.com/dhduvall/gcloudzap"
 )
 
 // Configure the pieces

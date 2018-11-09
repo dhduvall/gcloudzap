@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/logging/logadmin"
+	"github.com/dhduvall/gcloudzap"
 	"github.com/golang/protobuf/ptypes/struct"
-	"github.com/jonstaryuk/gcloudzap"
 )
 
 // Integration testing requires Google Application Default Credentials which

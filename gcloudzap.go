@@ -10,10 +10,10 @@ asynchronous and payloads are buffered. These benchmarks, on a MacBook Pro 2.4
 GHz Core i5, are a loose approximation of latencies on the critical path for
 the zapcore.Core implementation provided by this package.
 
-	$ go test -bench . github.com/jonstaryuk/gcloudzap
+	$ go test -bench . github.com/dhduvall/gcloudzap
 	goos: darwin
 	goarch: amd64
-	pkg: github.com/jonstaryuk/gcloudzap
+	pkg: github.com/dhduvall/gcloudzap
 	BenchmarkCoreClone-4   	 2000000	       607 ns/op
 	BenchmarkCoreWrite-4   	 1000000	      2811 ns/op
 
@@ -23,7 +23,7 @@ Zap docs: https://godoc.org/go.uber.org/zap
 Stackdriver Logging docs: https://cloud.google.com/logging/docs/
 
 */
-package gcloudzap // import "github.com/jonstaryuk/gcloudzap"
+package gcloudzap // import "github.com/dhduvall/gcloudzap"
 
 import (
 	"context"
