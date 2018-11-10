@@ -58,12 +58,10 @@ func TestCoreWrite(t *testing.T) {
 			Timestamp: ts,
 			Severity:  gcl.Warning,
 			Payload: map[string]interface{}{
-				"msg":    "hello",
-				"logger": "test",
-				"caller": "undefined",
-				"stack":  "",
-				"foo":    "bar",
-				"baz":    "qux",
+				"message": "hello",
+				"logger":  "test",
+				"foo":     "bar",
+				"baz":     "qux",
 			},
 		},
 	}
@@ -79,12 +77,10 @@ func TestCoreWrite(t *testing.T) {
 		Timestamp: ts,
 		Severity:  gcl.Warning,
 		Payload: map[string]interface{}{
-			"msg":    "hello",
-			"logger": "test",
-			"caller": "undefined",
-			"stack":  "",
-			"foo":    "bar",
-			"asdf":   "asdf",
+			"message": "hello",
+			"logger":  "test",
+			"foo":     "bar",
+			"asdf":    "asdf",
 		},
 	})
 	if diff := cmp.Diff(expected, l.entries); diff != "" {

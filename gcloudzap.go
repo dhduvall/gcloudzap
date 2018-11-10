@@ -28,11 +28,13 @@ package gcloudzap // import "github.com/dhduvall/gcloudzap"
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	gcl "cloud.google.com/go/logging"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	logpb "google.golang.org/genproto/googleapis/logging/v2"
 )
 
 func newClient(projectID string) (*gcl.Client, error) {
@@ -163,8 +165,11 @@ func (c *Core) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Checked
 
 // Write implements zapcore.Core. It writes a log entry to Stackdriver.
 //
-// The "logger", "msg", "caller", and "stack" fields on the payload are
-// populated from their respective values on the zapcore.Entry.
+// Certain fields in the zapcore.Entry are used to populate the Stackdriver
+// entry.  The Message field maps to "message", and the LoggerName and Stack
+// fields map to "logger" and "stack", respectively, if they're present.  The
+// Caller field is mapped to the Stackdriver entry object's SourceLocation
+// field.
 func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	severity, specified := c.SeverityMapping[ze.Level]
 	if !specified {
@@ -173,16 +178,27 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 
 	payload := clone(c.fields, newFields)
 
-	payload["logger"] = ze.LoggerName
-	payload["msg"] = ze.Message
-	payload["caller"] = ze.Caller.String()
-	payload["stack"] = ze.Stack
+	if ze.LoggerName != "" {
+		payload["logger"] = ze.LoggerName
+	}
+	if ze.Stack != "" {
+		payload["stack"] = ze.Stack
+	}
+	payload["message"] = ze.Message
 
-	c.Logger.Log(gcl.Entry{
+	entry := gcl.Entry{
 		Timestamp: ze.Time,
 		Severity:  severity,
 		Payload:   payload,
-	})
+	}
+	if ze.Caller.Defined {
+		entry.SourceLocation = &logpb.LogEntrySourceLocation{
+			File:     ze.Caller.File,
+			Line:     int64(ze.Caller.Line),
+			Function: runtime.FuncForPC(ze.Caller.PC).Name(),
+		}
+	}
+	c.Logger.Log(entry)
 
 	return nil
 }
