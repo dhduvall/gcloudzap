@@ -80,7 +80,7 @@ func NewProduction(projectID string, logID string) (*zap.Logger, error) {
 // New creates a new zap.Logger which will write entries to Stackdriver in
 // addition to the destination specified by the provided zap configuration.
 func New(cfg zap.Config, client *gcl.Client, logID string, opts ...zap.Option) (*zap.Logger, error) {
-	zl, err := cfg.Build(opts...)
+	zl, err := cfg.Build()
 	if err != nil {
 		return nil, err
 	}
