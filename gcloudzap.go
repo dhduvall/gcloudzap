@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"time"
 
 	gcl "cloud.google.com/go/logging"
@@ -94,6 +95,50 @@ func New(cfg zap.Config, client *gcl.Client, logID string, opts ...zap.Option) (
 	if client == nil {
 		return nil, fmt.Errorf("The provided GCL client is nil")
 	}
+
+	// Here we translate all the members of a zap.Config into a zap.Option
+	// array to pass to zap.New(), since otherwise the config passed in to
+	// zl by cfg.Build() is lost when we grab its core; we basically copy
+	// zap.Config.buildOptions().
+	var nopts []zap.Option
+	if cfg.Development {
+		nopts = append(nopts, zap.Development())
+	}
+
+	if !cfg.DisableCaller {
+		nopts = append(nopts, zap.AddCaller())
+	}
+
+	stackLevel := zap.ErrorLevel
+	if cfg.Development {
+		stackLevel = zap.WarnLevel
+	}
+	if !cfg.DisableStacktrace {
+		nopts = append(nopts, zap.AddStacktrace(stackLevel))
+	}
+
+	if cfg.Sampling != nil {
+		nopts = append(nopts, zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+			return zapcore.NewSampler(core, time.Second,
+				int(cfg.Sampling.Initial), int(cfg.Sampling.Thereafter))
+		}))
+	}
+
+	if len(cfg.InitialFields) > 0 {
+		fs := make([]zap.Field, 0, len(cfg.InitialFields))
+		keys := make([]string, 0, len(cfg.InitialFields))
+		for k := range cfg.InitialFields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fs = append(fs, zap.Any(k, cfg.InitialFields[k]))
+		}
+		nopts = append(nopts, zap.Fields(fs...))
+	}
+
+	// The user-supplied options must override our defaults
+	opts = append(nopts, opts...)
 
 	tee := Tee(zl.Core(), client, logID)
 	return zap.New(tee, opts...), nil
