@@ -37,6 +37,12 @@ import (
 	logpb "google.golang.org/genproto/googleapis/logging/v2"
 )
 
+const (
+	// InsertIDKey is the payload field key to use to set the insertId field
+	// in the LogEntry object.
+	InsertIDKey = "logging.googleapis.com/insertId"
+)
+
 func newClient(projectID string) (*gcl.Client, error) {
 	if projectID == "" {
 		return nil, newError("the provided projectID is empty")
@@ -191,6 +197,13 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 		Severity:  severity,
 		Payload:   payload,
 	}
+
+	insertID, ok := payload[InsertIDKey].(string)
+	if ok && insertID != "" {
+		entry.InsertID = insertID
+	}
+	delete(payload, InsertIDKey)
+
 	if ze.Caller.Defined {
 		entry.SourceLocation = &logpb.LogEntrySourceLocation{
 			File:     ze.Caller.File,
