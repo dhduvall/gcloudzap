@@ -7,6 +7,7 @@ import (
 
 	gcl "cloud.google.com/go/logging"
 	"github.com/google/go-cmp/cmp"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -31,6 +32,27 @@ func TestCoreFields(t *testing.T) {
 	expected = map[string]interface{}{"foo": "bar", "baz": "qux"}
 	if diff := cmp.Diff(expected, c3.fields); diff != "" {
 		t.Error(diff)
+	}
+}
+
+func TestTimeField(t *testing.T) {
+	l := &testLogger{}
+	c := &Core{Logger: l}
+	now := time.Now()
+	fields := []zapcore.Field{zap.Time("timestamp", now)}
+	if err := c.Write(zapcore.Entry{}, fields); err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := l.entries[0].Payload.(map[string]interface{})
+	if !ok {
+		t.Fatal("Couldn't unpack payload")
+	}
+	lognow, ok := payload["timestamp"].(time.Time)
+	if !ok {
+		t.Fatal("Didn't get back a time.Time")
+	}
+	if !now.Equal(lognow) {
+		t.Fatal("Didn't get back the same time we logged")
 	}
 }
 

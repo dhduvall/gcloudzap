@@ -323,7 +323,12 @@ func clone(orig map[string]interface{}, newFields []zapcore.Field) map[string]in
 		case zapcore.StringType:
 			clone[f.Key] = f.String
 		case zapcore.TimeType:
-			clone[f.Key] = f.Interface.(time.Time)
+			// Handle uber-go/zap#425
+			if f.Interface == nil {
+				clone[f.Key] = time.Unix(0, f.Integer)
+			} else {
+				clone[f.Key] = time.Unix(0, f.Integer).In(f.Interface.(*time.Location))
+			}
 		case zapcore.Uint64Type:
 			clone[f.Key] = uint64(f.Integer)
 		case zapcore.Uint32Type:
