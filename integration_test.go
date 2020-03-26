@@ -217,10 +217,8 @@ func test_caller(t *testing.T, ctx context.Context, aClient *logadmin.Client, pr
 	assert.True(strings.HasPrefix(caller.(string), "gcloudzap/integration_test.go:"))
 
 	// Make sure it's in the entry object, too.
-	// This always fails, due to:
-	// https://github.com/GoogleCloudPlatform/google-cloud-go/issues/1219
-	// e := getEntry(ctx, t, aClient, project, testLogID, idfield)
-	// assert.NotNil(e.SourceLocation)
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	assert.NotNil(e.SourceLocation)
 }
 
 // Test that the stacktrace field comes through, and that the level we set for
