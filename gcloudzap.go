@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
 
 	gcl "cloud.google.com/go/logging"
@@ -154,6 +155,14 @@ type Core struct {
 	// library.
 	Logger GoogleCloudLogger
 
+	// subLoggers is a map of logIDs to logging.Logger instances from the
+	// Google Cloud Platform Go library, used when there are named zap
+	// loggers based off the original.
+	subLoggers map[string]GoogleCloudLogger
+
+	// Used when accessing subLoggers
+	loggerLock sync.Mutex
+
 	// Provide your own mapping of zapcore's Levels to Google's Severities, or
 	// use DefaultSeverityMapping. All of the Core's children will default to
 	// using this map.
@@ -166,10 +175,19 @@ type Core struct {
 
 	// fields should be built once and never mutated again.
 	fields map[string]interface{}
+
+	// The Google logging client object.
+	client *gcl.Client
+
+	// The base of the logID (the last component of the logName, as
+	// described in the GCP LogEntry documentation).
+	baseLogID string
 }
 
 // Tee returns a zapcore.Core that writes entries to both the provided core
-// and to Stackdriver using the provided client and log ID.
+// and to Stackdriver using the provided client.  The provided gclLogID will
+// form the base of each GCP LogEntry's logID, to which will be appended the zap
+// logger name.
 //
 // For fields to be written to Stackdriver, you must use the With() method on
 // the returned Core rather than just on zc. (This function has no way of
@@ -179,6 +197,8 @@ func Tee(zc zapcore.Core, client *gcl.Client, gclLogID string) zapcore.Core {
 	gc := &Core{
 		Logger:          client.Logger(gclLogID),
 		SeverityMapping: DefaultSeverityMapping,
+		client:          client,
+		baseLogID:       gclLogID,
 	}
 
 	for l := zapcore.DebugLevel; l <= zapcore.FatalLevel; l++ {
@@ -203,6 +223,9 @@ func (c *Core) With(newFields []zapcore.Field) zapcore.Core {
 		SeverityMapping: c.SeverityMapping,
 		MinLevel:        c.MinLevel,
 		fields:          clone(c.fields, newFields),
+		client:          c.client,
+		baseLogID:       c.baseLogID,
+		subLoggers:      c.subLoggers,
 	}
 }
 
@@ -217,10 +240,10 @@ func (c *Core) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Checked
 // Write implements zapcore.Core. It writes a log entry to Stackdriver.
 //
 // Certain fields in the zapcore.Entry are used to populate the Stackdriver
-// entry.  The Message field maps to "message", and the LoggerName and Stack
-// fields map to "logger" and "stack", respectively, if they're present.  The
-// Caller field is mapped to the Stackdriver entry object's SourceLocation
-// field.
+// entry: the Message field maps to "message" in the payload and the Stack field
+// maps to "stack".  The Caller field is mapped to the Stackdriver entry
+// object's SourceLocation field.  LoggerName helps populate the logName field
+// in the log entry, as well as mapping to "logger" in the payload.
 func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	severity, specified := c.SeverityMapping[ze.Level]
 	if !specified {
@@ -229,6 +252,8 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 
 	payload := clone(c.fields, newFields)
 
+	// We're putting LoggerName into the logName, so we're only keeping it
+	// in the payload for expectations from older clients.
 	if ze.LoggerName != "" {
 		payload["logger"] = ze.LoggerName
 	}
@@ -256,17 +281,56 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 			Function: runtime.FuncForPC(ze.Caller.PC).Name(),
 		}
 	}
-	c.Logger.Log(entry)
+
+	name := c.baseLogID
+	if ze.LoggerName != "" && name != "" {
+		name += "." + ze.LoggerName
+	} else if ze.LoggerName != "" {
+		name = ze.LoggerName
+	}
+
+	// Find the logger given by name; if that's not available, then use the
+	// default logger.
+	c.loggerLock.Lock()
+	logger, ok := c.subLoggers[name]
+	if !ok {
+		// The tests rely on the ability to have a nil client, since
+		// they don't actually test logging to Stackdriver.  In that
+		// case, fall back to the default logger.
+		if c.client != nil {
+			logger = c.client.Logger(name)
+			if c.subLoggers == nil {
+				c.subLoggers = make(map[string]GoogleCloudLogger)
+			}
+			c.subLoggers[name] = logger
+		} else {
+			logger = c.Logger
+		}
+	}
+	c.loggerLock.Unlock()
+
+	logger.Log(entry)
 
 	return nil
 }
 
 // Sync implements zapcore.Core. It flushes the Core's Logger instance.
 func (c *Core) Sync() error {
-	if err := c.Logger.Flush(); err != nil {
-		return newError("flushing Google Cloud logger: %v", err)
+	var ret error
+
+	if ret = c.Logger.Flush(); ret != nil {
+		ret = newError("flushing Google Cloud logger: %v", ret)
 	}
-	return nil
+
+	c.loggerLock.Lock()
+	defer c.loggerLock.Unlock()
+
+	for _, logger := range c.subLoggers {
+		if err := logger.Flush(); err != nil && ret == nil {
+			ret = newError("flushing Google Cloud logger: %v", err)
+		}
+	}
+	return ret
 }
 
 // DefaultSeverityMapping is the default mapping of zap's Levels to Google's

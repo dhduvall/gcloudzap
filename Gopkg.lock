@@ -486,6 +486,7 @@
   analyzer-name = "dep"
   analyzer-version = 1
   input-imports = [
+    "cloud.google.com/go/compute/metadata",
     "cloud.google.com/go/logging",
     "cloud.google.com/go/logging/logadmin",
     "github.com/golang/protobuf/ptypes/struct",

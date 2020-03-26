@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/logging"
 	"cloud.google.com/go/logging/logadmin"
 	"github.com/dhduvall/gcloudzap"
@@ -23,12 +24,14 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// Integration testing requires Google Application Default Credentials which
-// have read and write access to Stackdriver logs. If there is no
-// authenticated gcloud CLI installation, this environment variable must be
-// set: GOOGLE_APPLICATION_CREDENTIALS=path-to-credentials.json
+// Integration testing requires permissions to write and read Stackdriver logs,
+// and uses Application Default Credentials.  This typically means setting the
+// environment variable GOOGLE_APPLICATION_CREDENTIALS to the path to a file
+// containing the credentials of a user or service account that has those
+// permissions.
 //
-// A project ID is also required: GCL_PROJECT_ID=test-project-id
+// If not running on a GCE VM, a the environment variable GCL_PROJECT_ID must
+// also be set to the project ID.
 
 const testLogID = "_gcloudzap_integration_test"
 
@@ -59,10 +62,12 @@ func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, projec
 	var e *logging.Entry
 	var err error
 	insID := idfield.String
+	now := time.Now().Add(-1 * time.Minute).Format("2006-01-02T15:04:05-07:00")
 	for i := 0; i < 20; i++ {
 		es := client.Entries(ctx,
-			logadmin.Filter(fmt.Sprintf(`logName="projects/%s/logs/%s" `+
-				`AND insertId="%s"`, project, testLogID, insID)),
+			logadmin.Filter(fmt.Sprintf(`timestamp >= "%s" `+
+				`AND logName="projects/%s/logs/%s" `+
+				`AND insertId="%s"`, now, project, logID, insID)),
 			logadmin.NewestFirst())
 		e, err = es.Next()
 		if err == nil {
@@ -182,6 +187,41 @@ func test_fields(t *testing.T, ctx context.Context, aClient *logadmin.Client, pr
 	assertNoDups(t, assert, bufSinks["fields"])
 }
 
+func test_logname(t *testing.T, ctx context.Context, aClient *logadmin.Client, project string) {
+	assert := require.New(t)
+
+	config := zap.NewProductionConfig()
+	config.OutputPaths = []string{"buffer://logname"}
+
+	lClient, err := logging.NewClient(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lClient.Close()
+
+	log, err := gcloudzap.New(config, lClient, testLogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slog := log.Sugar()
+
+	idfield := idField()
+	slog.Infow("test_logname", idfield)
+
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	logName := strings.Join([]string{"projects", project, "logs", testLogID}, "/")
+	assert.Equal(logName, e.LogName)
+
+	slog = slog.Named("sublogger")
+	idfield = idField()
+	slog.Infow("test_logname2", idfield)
+
+	subTestLogID := testLogID + ".sublogger"
+	e = getEntry(ctx, t, aClient, project, subTestLogID, idfield)
+	logName += ".sublogger"
+	assert.Equal(logName, e.LogName)
+}
+
 // Make sure that if the configuration specifies adding the log call site, it
 // shows up in the logs.
 func test_caller(t *testing.T, ctx context.Context, aClient *logadmin.Client, project string) {
@@ -259,7 +299,12 @@ func test_stacktrace(t *testing.T, ctx context.Context, aClient *logadmin.Client
 func TestIntegration(t *testing.T) {
 	project, _ := os.LookupEnv("GCL_PROJECT_ID")
 	if project == "" {
-		t.Fatal("GCL_PROJECT_ID is blank")
+		var err error
+		project, err = metadata.ProjectID()
+		if err != nil {
+			t.Fatalf("Could not determine project ID; "+
+				"please set $GCL_PROJECT_ID: %s", err)
+		}
 	}
 
 	ctx := context.Background()
@@ -281,6 +326,7 @@ func TestIntegration(t *testing.T) {
 
 	t.Run("basic", func(t *testing.T) { test_basic(t, ctx, client, project) })
 	t.Run("fields", func(t *testing.T) { test_fields(t, ctx, client, project) })
+	t.Run("logname", func(t *testing.T) { test_logname(t, ctx, client, project) })
 	t.Run("caller", func(t *testing.T) { test_caller(t, ctx, client, project) })
 	t.Run("stack", func(t *testing.T) { test_stacktrace(t, ctx, client, project) })
 }
