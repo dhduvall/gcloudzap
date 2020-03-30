@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"cloud.google.com/go/logging/logadmin"
 	"github.com/dhduvall/gcloudzap"
 	"github.com/golang/protobuf/ptypes/struct"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
@@ -56,6 +58,43 @@ func idField() zap.Field {
 	return zap.String(gcloudzap.InsertIDKey, randString(12))
 }
 
+type stack []uintptr
+
+func (s *stack) StackTrace() errors.StackTrace {
+	f := make([]errors.Frame, len(*s))
+	for i := 0; i < len(f); i++ {
+		f[i] = errors.Frame((*s)[i])
+	}
+	return f
+}
+
+type stackError struct {
+	stack errors.StackTrace
+}
+
+func (e *stackError) StackTrace() errors.StackTrace {
+	return e.stack
+}
+
+func (e *stackError) Error() string {
+	return ""
+}
+
+func mkStackError() *stackError {
+	var pcs [32]uintptr
+	n := runtime.Callers(2, pcs[:])
+	var st stack = pcs[0:n]
+	return &stackError{st.StackTrace()}
+}
+
+func sourceField(err *stackError) zap.Field {
+	return zap.Field{
+		Key:       gcloudzap.CallerKey,
+		Type:      gcloudzap.CallerType,
+		Interface: err,
+	}
+}
+
 // getEntry searches for the log entry specified by project, logID, and idfield,
 // waiting for up to 20 seconds for it to show up, if necessary, and returns it.
 func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, project, logID string, idfield zap.Field) *logging.Entry {
@@ -63,7 +102,7 @@ func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, projec
 	var err error
 	insID := idfield.String
 	now := time.Now().Add(-1 * time.Minute).Format("2006-01-02T15:04:05-07:00")
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 10; i++ {
 		es := client.Entries(ctx,
 			logadmin.Filter(fmt.Sprintf(`timestamp >= "%s" `+
 				`AND logName="projects/%s/logs/%s" `+
@@ -75,7 +114,7 @@ func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, projec
 		}
 		switch err {
 		case iterator.Done:
-			time.Sleep(1 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		default:
 			t.Fatal(err)
@@ -259,6 +298,64 @@ func test_caller(t *testing.T, ctx context.Context, aClient *logadmin.Client, pr
 	// Make sure it's in the entry object, too.
 	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
 	assert.NotNil(e.SourceLocation)
+	assert.True(strings.HasSuffix(e.SourceLocation.File, "gcloudzap/integration_test.go"))
+	assert.Equal("github.com/dhduvall/gcloudzap_test.test_caller", e.SourceLocation.Function)
+	pSlice := strings.Split(e.SourceLocation.File, "/")
+	p := strings.Join(pSlice[len(pSlice)-2:], "/")
+	assert.Equal(caller.(string), fmt.Sprintf("%s:%d", p, e.SourceLocation.Line))
+}
+
+// Make sure that if we inject a call site into the payload, it makes it into
+// Stackdriver in the SourceLocation.
+func test_injectedCaller(t *testing.T, ctx context.Context, aClient *logadmin.Client, project string) {
+	assert := require.New(t)
+
+	config := zap.NewProductionConfig()
+	config.OutputPaths = []string{"buffer://injected-caller"}
+
+	lClient, err := logging.NewClient(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lClient.Close()
+
+	log, err := gcloudzap.New(config, lClient, testLogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slog := log.Sugar()
+
+	idfield := idField()
+	se := mkStackError()
+	sourcefield := sourceField(se)
+	slog.Infow("test_injected-caller", idfield, sourcefield)
+
+	frame := se.stack[0]
+	pc := uintptr(frame) - 1
+	fn := runtime.FuncForPC(pc)
+	_, seLine := fn.FileLine(pc)
+
+	// Make sure that the local log contains a "caller" key with the right
+	// information.
+	m := make(map[string]interface{})
+	err = json.Unmarshal(bufSinks["injected-caller"].Bytes(), &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, ok := m["caller"]
+	assert.True(ok)
+	assert.True(strings.HasPrefix(caller.(string), "gcloudzap/integration_test.go:"))
+
+	// Make sure it's in the entry object, too.
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	assert.NotNil(e.SourceLocation)
+	assert.True(strings.HasSuffix(e.SourceLocation.File, "gcloudzap/integration_test.go"))
+	assert.Equal("github.com/dhduvall/gcloudzap_test.test_injectedCaller", e.SourceLocation.Function)
+	assert.Equal(seLine, int(e.SourceLocation.Line))
+	pSlice := strings.Split(e.SourceLocation.File, "/")
+	p := strings.Join(pSlice[len(pSlice)-2:], "/")
+	// We called slog.Infow() two lines after creating the error.
+	assert.Equal(caller.(string), fmt.Sprintf("%s:%d", p, e.SourceLocation.Line+2))
 }
 
 // Test that the stacktrace field comes through, and that the level we set for
@@ -328,6 +425,7 @@ func TestIntegration(t *testing.T) {
 	t.Run("fields", func(t *testing.T) { test_fields(t, ctx, client, project) })
 	t.Run("logname", func(t *testing.T) { test_logname(t, ctx, client, project) })
 	t.Run("caller", func(t *testing.T) { test_caller(t, ctx, client, project) })
+	t.Run("injected-caller", func(t *testing.T) { test_injectedCaller(t, ctx, client, project) })
 	t.Run("stack", func(t *testing.T) { test_stacktrace(t, ctx, client, project) })
 }
 

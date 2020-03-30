@@ -28,6 +28,7 @@ package gcloudzap // import "github.com/dhduvall/gcloudzap"
 import (
 	"context"
 	"fmt"
+	"github.com/pkg/errors"
 	"runtime"
 	"sort"
 	"sync"
@@ -43,6 +44,13 @@ const (
 	// InsertIDKey is the payload field key to use to set the insertId field
 	// in the LogEntry object.
 	InsertIDKey = "logging.googleapis.com/insertId"
+
+	// CallerKey is the payload field key to use to set the sourceLocation
+	// field in the LogEntry object.
+	CallerKey = "logging.googleapis.com/sourceLocation"
+	// CallerType is the zap field type to use to set the sourceLocation
+	// field in the LogEntry object.
+	CallerType = zapcore.SkipType
 )
 
 func newClient(projectID string) (*gcl.Client, error) {
@@ -237,13 +245,21 @@ func (c *Core) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.Checked
 	return ce
 }
 
+type stackTracer interface {
+	StackTrace() errors.StackTrace
+}
+
 // Write implements zapcore.Core. It writes a log entry to Stackdriver.
 //
 // Certain fields in the zapcore.Entry are used to populate the Stackdriver
 // entry: the Message field maps to "message" in the payload and the Stack field
-// maps to "stack".  The Caller field is mapped to the Stackdriver entry
-// object's SourceLocation field.  LoggerName helps populate the logName field
-// in the log entry, as well as mapping to "logger" in the payload.
+// maps to "stack".  If there is a field with key CallerKey and type CallerType,
+// and it is a pkg/errors.stackTracer, then the first frame of the stack is put
+// into the Stackdriver entry object's SourceLocation field, and the original
+// field is removed from the payload sent to Stackdriver.  If not, then the
+// Caller field from the zap Entry is used instead.  LoggerName helps populate
+// the logName field in the log entry, as well as mapping to "logger" in the
+// payload.
 func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	severity, specified := c.SeverityMapping[ze.Level]
 	if !specified {
@@ -274,7 +290,20 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	}
 	delete(payload, InsertIDKey)
 
-	if ze.Caller.Defined {
+	if caller, ok := payload[CallerKey]; ok {
+		if tracer, ok := caller.(stackTracer); ok {
+			frame := tracer.StackTrace()[0]
+			pc := uintptr(frame) - 1
+			fn := runtime.FuncForPC(pc)
+			file, line := fn.FileLine(pc)
+			entry.SourceLocation = &logpb.LogEntrySourceLocation{
+				File:     file,
+				Line:     int64(line),
+				Function: fn.Name(),
+			}
+			delete(payload, CallerKey)
+		}
+	} else if ze.Caller.Defined {
 		entry.SourceLocation = &logpb.LogEntrySourceLocation{
 			File:     ze.Caller.File,
 			Line:     int64(ze.Caller.Line),
@@ -411,7 +440,11 @@ func clone(orig map[string]interface{}, newFields []zapcore.Field) map[string]in
 		case zapcore.ErrorType:
 			clone[f.Key] = f.Interface.(error).Error()
 		case zapcore.SkipType:
-			continue
+			// If we're hiding caller information here, then don't
+			// actually skip.
+			if f.Key == CallerKey {
+				clone[f.Key] = f.Interface
+			}
 		default:
 			clone[f.Key] = f.Interface
 		}
