@@ -23,6 +23,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/api/iterator"
 )
 
@@ -97,7 +98,7 @@ func sourceField(err *stackError) zap.Field {
 
 // getEntry searches for the log entry specified by project, logID, and idfield,
 // waiting for up to 20 seconds for it to show up, if necessary, and returns it.
-func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, project, logID string, idfield zap.Field) *logging.Entry {
+func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, project, logID string, idfield zap.Field, fatal bool) *logging.Entry {
 	var e *logging.Entry
 	var err error
 	insID := idfield.String
@@ -120,7 +121,9 @@ func getEntry(ctx context.Context, t *testing.T, client *logadmin.Client, projec
 			t.Fatal(err)
 		}
 	}
-	t.Fatal(fmt.Sprintf("Timed out waiting for %s/%s", logID, insID))
+	if fatal {
+		t.Fatal(fmt.Sprintf("Timed out waiting for %s/%s", logID, insID))
+	}
 	return nil
 }
 
@@ -154,7 +157,7 @@ func test_basic(t *testing.T, ctx context.Context, client *logadmin.Client, proj
 	idfield := idField()
 	l1.Infow("test_basic", idfield)
 
-	e := getEntry(ctx, t, client, project, testLogID, idfield)
+	e := getEntry(ctx, t, client, project, testLogID, idfield, true)
 	fields := e.Payload.(*structpb.Struct).GetFields()
 	if len(fields) != 3 {
 		t.Errorf("entry has incorrect number of fields; expected %d, got %d", 3, len(fields))
@@ -215,7 +218,7 @@ func test_fields(t *testing.T, ctx context.Context, aClient *logadmin.Client, pr
 	idfield := idField()
 	slog.Infow("test_fields", idfield)
 
-	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield, true)
 	fields := e.Payload.(*structpb.Struct).GetFields()
 	assert.Len(fields, 2)
 	assert.Equal("test_fields", fields["message"].GetStringValue())
@@ -247,7 +250,7 @@ func test_logname(t *testing.T, ctx context.Context, aClient *logadmin.Client, p
 	idfield := idField()
 	slog.Infow("test_logname", idfield)
 
-	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield, true)
 	logName := strings.Join([]string{"projects", project, "logs", testLogID}, "/")
 	assert.Equal(logName, e.LogName)
 
@@ -256,7 +259,7 @@ func test_logname(t *testing.T, ctx context.Context, aClient *logadmin.Client, p
 	slog.Infow("test_logname2", idfield)
 
 	subTestLogID := testLogID + ".sublogger"
-	e = getEntry(ctx, t, aClient, project, subTestLogID, idfield)
+	e = getEntry(ctx, t, aClient, project, subTestLogID, idfield, true)
 	logName += ".sublogger"
 	assert.Equal(logName, e.LogName)
 }
@@ -296,7 +299,7 @@ func test_caller(t *testing.T, ctx context.Context, aClient *logadmin.Client, pr
 	assert.True(strings.HasPrefix(caller.(string), "gcloudzap/integration_test.go:"))
 
 	// Make sure it's in the entry object, too.
-	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield, true)
 	assert.NotNil(e.SourceLocation)
 	assert.True(strings.HasSuffix(e.SourceLocation.File, "gcloudzap/integration_test.go"))
 	assert.Equal("github.com/dhduvall/gcloudzap_test.test_caller", e.SourceLocation.Function)
@@ -347,7 +350,7 @@ func test_injectedCaller(t *testing.T, ctx context.Context, aClient *logadmin.Cl
 	assert.True(strings.HasPrefix(caller.(string), "gcloudzap/integration_test.go:"))
 
 	// Make sure it's in the entry object, too.
-	e := getEntry(ctx, t, aClient, project, testLogID, idfield)
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield, true)
 	assert.NotNil(e.SourceLocation)
 	assert.True(strings.HasSuffix(e.SourceLocation.File, "gcloudzap/integration_test.go"))
 	assert.Equal("github.com/dhduvall/gcloudzap_test.test_injectedCaller", e.SourceLocation.Function)
@@ -393,6 +396,38 @@ func test_stacktrace(t *testing.T, ctx context.Context, aClient *logadmin.Client
 		"github.com/dhduvall/gcloudzap_test.test_stacktrace"))
 }
 
+func test_skip(t *testing.T, ctx context.Context, aClient *logadmin.Client, project string) {
+	assert := require.New(t)
+
+	config := zap.NewProductionConfig()
+	config.OutputPaths = []string{"buffer://skip"}
+
+	lClient, err := logging.NewClient(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lClient.Close()
+
+	log, err := gcloudzap.New(config, lClient, testLogID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slog := log.Sugar()
+
+	idfield := idField()
+	slog.Infow("test_logname", idfield, gcloudzap.SkipKey, nil)
+
+	e := getEntry(ctx, t, aClient, project, testLogID, idfield, false)
+	assert.Nil(e)
+
+	idfield = idField()
+	slog.Infow("test_logname", idfield, zapcore.Field{
+		Key: gcloudzap.SkipKey, Type: zapcore.SkipType})
+
+	e = getEntry(ctx, t, aClient, project, testLogID, idfield, false)
+	assert.Nil(e)
+}
+
 func TestIntegration(t *testing.T) {
 	project, _ := os.LookupEnv("GCL_PROJECT_ID")
 	if project == "" {
@@ -421,12 +456,21 @@ func TestIntegration(t *testing.T) {
 		return bufSinks[name], nil
 	})
 
-	t.Run("basic", func(t *testing.T) { test_basic(t, ctx, client, project) })
-	t.Run("fields", func(t *testing.T) { test_fields(t, ctx, client, project) })
-	t.Run("logname", func(t *testing.T) { test_logname(t, ctx, client, project) })
-	t.Run("caller", func(t *testing.T) { test_caller(t, ctx, client, project) })
-	t.Run("injected-caller", func(t *testing.T) { test_injectedCaller(t, ctx, client, project) })
-	t.Run("stack", func(t *testing.T) { test_stacktrace(t, ctx, client, project) })
+	testCases := []struct {
+		name  string
+		tFunc func(*testing.T, context.Context, *logadmin.Client, string)
+	}{
+		{"basic", test_basic},
+		{"fields", test_fields},
+		{"logname", test_logname},
+		{"caller", test_caller},
+		{"injected-caller", test_injectedCaller},
+		{"stack", test_stacktrace},
+		{"skip", test_skip},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) { tc.tFunc(t, ctx, client, project) })
+	}
 }
 
 func init() {

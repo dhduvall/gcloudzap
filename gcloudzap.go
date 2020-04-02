@@ -51,6 +51,18 @@ const (
 	// CallerType is the zap field type to use to set the sourceLocation
 	// field in the LogEntry object.
 	CallerType = zapcore.SkipType
+
+	// SkipKey is the payload field key to use to tell the core not to write
+	// the entry to Stackdriver.
+	SkipKey = "logging.googleapis.com/skipLogging"
+	// SkipType is the zap field type that ought to (though needn't) be used
+	// with a field with key SkipKey.
+	SkipType = zapcore.SkipType
+)
+
+var (
+	// SkipField is a pre-constructed field that will skip being logged
+	SkipField = zapcore.Field{Key: SkipKey, Type: SkipType}
 )
 
 func newClient(projectID string) (*gcl.Client, error) {
@@ -253,13 +265,20 @@ type stackTracer interface {
 //
 // Certain fields in the zapcore.Entry are used to populate the Stackdriver
 // entry: the Message field maps to "message" in the payload and the Stack field
-// maps to "stack".  If there is a field with key CallerKey and type CallerType,
-// and it is a pkg/errors.stackTracer, then the first frame of the stack is put
-// into the Stackdriver entry object's SourceLocation field, and the original
-// field is removed from the payload sent to Stackdriver.  If not, then the
-// Caller field from the zap Entry is used instead.  LoggerName helps populate
-// the logName field in the log entry, as well as mapping to "logger" in the
-// payload.
+// maps to "stack".  LoggerName helps populate the logName field in the log
+// entry, as well as mapping to "logger" in the payload.
+//
+// If there is a field with key CallerKey and type CallerType, and it is a
+// pkg/errors.stackTracer, then the first frame of the stack is put into the
+// Stackdriver entry object's SourceLocation field, and the original field is
+// removed from the payload sent to Stackdriver.  If not, then the Caller field
+// from the zap Entry is used instead.
+//
+// If there is a field with key SkipKey (and any value, but type
+// zapcore.SkipType would be the most useful), the core will skip writing this
+// entry to Stackdriver.  This allows the application to prevent writing
+// sensitive data to the cloud, while still allowing cores writing to the
+// terminal to write those entries.
 func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	severity, specified := c.SeverityMapping[ze.Level]
 	if !specified {
@@ -267,6 +286,11 @@ func (c *Core) Write(ze zapcore.Entry, newFields []zapcore.Field) error {
 	}
 
 	payload := clone(c.fields, newFields)
+
+	// If the logger asked us to skip this entry, just return.
+	if _, ok := payload[SkipKey]; ok {
+		return nil
+	}
 
 	// We're putting LoggerName into the logName, so we're only keeping it
 	// in the payload for expectations from older clients.
@@ -442,7 +466,7 @@ func clone(orig map[string]interface{}, newFields []zapcore.Field) map[string]in
 		case zapcore.SkipType:
 			// If we're hiding caller information here, then don't
 			// actually skip.
-			if f.Key == CallerKey {
+			if f.Key == CallerKey || f.Key == SkipKey {
 				clone[f.Key] = f.Interface
 			}
 		default:
